@@ -1,10 +1,8 @@
 import feedparser
-import google.generativeai as genai
 import requests
 import json
 import os
 import re
-import hashlib
 import random
 import time
 from datetime import datetime
@@ -12,7 +10,7 @@ from datetime import datetime
 # ============================================================
 #  CONFIG — GitHub Secrets থেকে নেবে
 # ============================================================
-GEMINI_API_KEY     = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 BLOGGER_BLOG_ID    = os.environ["BLOGGER_BLOG_ID"]
 REFRESH_TOKEN      = os.environ["BLOGGER_REFRESH_TOKEN"]
 CLIENT_ID          = os.environ["BLOGGER_CLIENT_ID"]
@@ -30,7 +28,6 @@ SOCIAL_LINKS = {
     "threads":   "https://www.threads.com/@hawanewsbd?hl=en",
 }
 
-# ✅ মাত্র ২টি RSS — সেরা viral source
 RSS_FEEDS = [
     {
         "url":      "https://cointelegraph.com/rss",
@@ -44,7 +41,13 @@ RSS_FEEDS = [
     },
 ]
 
-GEMINI_PROMPT = """You are an expert news writer. Rewrite the following English news into an engaging, high-quality, and SEO-friendly English blog post.
+GROQ_MODELS = [
+    "llama-3.1-8b-instant",
+    "llama3-8b-8192",
+    "gemma2-9b-it",
+]
+
+GROQ_PROMPT = """You are an expert news writer. Rewrite the following English news into an engaging, high-quality, and SEO-friendly English blog post.
 
 Rules:
 1. Title: Create an attractive, catchy, and SEO-friendly English title.
@@ -56,9 +59,6 @@ Rules:
 {"title": "English title here", "content": "HTML content here", "tags": ["tag1","tag2","tag3"]}"""
 
 
-# ============================================================
-#  DUPLICATE TRACKING
-# ============================================================
 def load_posted():
     if os.path.exists(POSTED_FILE):
         with open(POSTED_FILE, "r") as f:
@@ -70,9 +70,6 @@ def save_posted(posted):
         json.dump(list(posted), f)
 
 
-# ============================================================
-#  RSS FETCH
-# ============================================================
 def fetch_all_items():
     items = []
     for feed in RSS_FEEDS:
@@ -103,60 +100,61 @@ def fetch_all_items():
     return items
 
 
-# ============================================================
-#  GEMINI REWRITE — delay সহ rate limit fix
-# ============================================================
-def rewrite_with_gemini(item):
-    genai.configure(api_key=GEMINI_API_KEY)
+def rewrite_with_groq(item):
+    prompt = GROQ_PROMPT + f"\n\nOriginal News:\nTitle: {item['title']}\nContent: {item['description']}"
 
-    models = [
-        "gemini-2.0-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-8b",
-        "gemini-2.5-flash",
-    ]
-
-    prompt = GEMINI_PROMPT + f"\n\nOriginal News:\nTitle: {item['title']}\nContent: {item['description']}"
-
-    for model_name in models:
+    for model_name in GROQ_MODELS:
         for attempt in range(1, 4):
             try:
-                print(f"🤖 Trying: {model_name} (attempt {attempt}/3)")
-                model    = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                text     = response.text.strip()
+                print(f"🤖 Trying Groq: {model_name} (attempt {attempt}/3)")
+                response = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type":  "application/json",
+                    },
+                    json={
+                        "model":    model_name,
+                        "messages": [
+                            {"role": "system", "content": "You are a professional news blog writer. Always respond in valid JSON only."},
+                            {"role": "user",   "content": prompt},
+                        ],
+                        "max_tokens":  1500,
+                        "temperature": 0.7,
+                    },
+                    timeout=30,
+                )
 
+                if response.status_code == 429:
+                    wait = 20 * attempt
+                    print(f"⚡ {model_name} rate limit — {wait}s অপেক্ষা...")
+                    time.sleep(wait)
+                    continue
+
+                if response.status_code != 200:
+                    print(f"⚠️ {model_name} error: {response.status_code} — {response.text[:200]}")
+                    break
+
+                text = response.json()["choices"][0]["message"]["content"].strip()
                 text_clean = re.sub(r"```json|```", "", text).strip()
                 match = re.search(r"\{[\s\S]*\}", text_clean)
                 if match:
                     parsed = json.loads(match.group())
                     if parsed.get("title") and parsed.get("content"):
-                        print(f"✅ Gemini OK: {model_name}")
+                        print(f"✅ Groq OK: {model_name}")
                         return parsed
 
                 return {"title": item["title"], "content": f"<p>{text}</p>", "tags": [item["category"]]}
 
             except Exception as e:
-                err = str(e)
-                if "429" in err or "quota" in err.lower() or "rate" in err.lower():
-                    print(f"⚡ {model_name} rate limit — 30s অপেক্ষা করছি...")
-                    time.sleep(30)   # ✅ rate limit হলে 30 সেকেন্ড wait
-                    break            # পরের model এ যাও
-                elif "503" in err:
-                    wait = attempt * 10
-                    print(f"⏳ {model_name} busy, {wait}s অপেক্ষা...")
-                    time.sleep(wait)
-                else:
-                    print(f"⚠️ {model_name} error: {err}")
-                    break
+                print(f"⚠️ {model_name} exception: {e}")
+                time.sleep(5)
+                break
 
-    print("❌ সব Gemini model fail হয়েছে।")
+    print("❌ সব Groq model fail হয়েছে।")
     return None
 
 
-# ============================================================
-#  IMAGE FINDER
-# ============================================================
 def find_image(item, tags):
     url = item.get("image")
     if url and re.search(r"\.(jpg|jpeg|png|webp|gif)", url, re.I):
@@ -168,12 +166,12 @@ def find_image(item, tags):
             r = requests.get(
                 "https://pixabay.com/api/",
                 params={
-                    "key":          PIXABAY_API_KEY,
-                    "q":            kw,
-                    "image_type":   "photo",
-                    "orientation":  "horizontal",
-                    "per_page":     5,
-                    "safesearch":   "true",
+                    "key":         PIXABAY_API_KEY,
+                    "q":           kw,
+                    "image_type":  "photo",
+                    "orientation": "horizontal",
+                    "per_page":    5,
+                    "safesearch":  "true",
                 },
                 timeout=10,
             )
@@ -187,9 +185,6 @@ def find_image(item, tags):
     return f"https://placehold.co/800x400/{color}/ffffff?text={item['category']}+News"
 
 
-# ============================================================
-#  BLOGGER ACCESS TOKEN
-# ============================================================
 def get_access_token():
     r = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id":     CLIENT_ID,
@@ -200,9 +195,6 @@ def get_access_token():
     return r.json()["access_token"]
 
 
-# ============================================================
-#  BLOGGER POST
-# ============================================================
 def create_blogger_post(rewritten, image_url, category, label):
     token = get_access_token()
 
@@ -255,9 +247,6 @@ def create_blogger_post(rewritten, image_url, category, label):
         return None
 
 
-# ============================================================
-#  MAIN
-# ============================================================
 def main():
     print("🚀 Auto Blogger শুরু হয়েছে...")
     posted = load_posted()
@@ -273,7 +262,7 @@ def main():
             continue
 
         print(f"✍️ Processing: {item['title']}")
-        rewritten = rewrite_with_gemini(item)
+        rewritten = rewrite_with_groq(item)
         if not rewritten:
             continue
 
@@ -287,10 +276,9 @@ def main():
         count += 1
         print(f"✅ Posted ({count}/{POSTS_PER_RUN}): {rewritten['title']}")
 
-        # ✅ প্রতিটি post এর পর 15 সেকেন্ড বিরতি
         if count < POSTS_PER_RUN:
-            print("⏱️ পরের post এর জন্য 15s অপেক্ষা...")
-            time.sleep(15)
+            print("⏱️ পরের post এর জন্য 10s অপেক্ষা...")
+            time.sleep(10)
 
     print(f"🏁 সম্পন্ন! এই run এ {count}টি post হয়েছে।")
 
