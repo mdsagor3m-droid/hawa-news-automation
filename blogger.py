@@ -11,7 +11,6 @@ BLOGGER_BLOG_ID    = os.environ["BLOGGER_BLOG_ID"]
 REFRESH_TOKEN      = os.environ["BLOGGER_REFRESH_TOKEN"]
 CLIENT_ID          = os.environ["BLOGGER_CLIENT_ID"]
 CLIENT_SECRET      = os.environ["BLOGGER_CLIENT_SECRET"]
-PIXABAY_API_KEY    = os.environ.get("PIXABAY_API_KEY", "")
 POSTS_PER_RUN      = int(os.environ.get("POSTS_PER_RUN", "3"))
 POSTED_FILE        = "posted_urls.json"
 
@@ -29,7 +28,6 @@ RSS_FEEDS = [
     {"url": "https://feeds.bbci.co.uk/sport/rss.xml", "category": "Sports", "label": "⚽ Sports"},
 ]
 
-# ✅ Updated Groq models (2025)
 GROQ_MODELS = [
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
@@ -63,11 +61,45 @@ def fetch_all_items():
                 desc  = entry.get("summary", "")
                 if not link or not title:
                     continue
+
+                # ✅ 4 method এ RSS original image খোঁজা
                 image = None
-                if "media_content" in entry:
-                    image = entry.media_content[0].get("url")
-                elif "enclosures" in entry and entry.enclosures:
-                    image = entry.enclosures[0].get("href")
+
+                # Method 1: media_content
+                if hasattr(entry, 'media_content') and entry.media_content:
+                    for mc in entry.media_content:
+                        url = mc.get("url", "")
+                        if url and re.search(r"\.(jpg|jpeg|png|webp)", url, re.I):
+                            image = url
+                            break
+
+                # Method 2: media_thumbnail
+                if not image and hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+                    img = entry.media_thumbnail[0].get("url", "")
+                    if img:
+                        image = img
+
+                # Method 3: enclosures
+                if not image and hasattr(entry, 'enclosures') and entry.enclosures:
+                    for enc in entry.enclosures:
+                        href = enc.get("href", "")
+                        if href and re.search(r"\.(jpg|jpeg|png|webp)", href, re.I):
+                            image = href
+                            break
+
+                # Method 4: img tag inside content/summary
+                if not image:
+                    content_val = ""
+                    if entry.get("content"):
+                        content_val = entry.content[0].get("value", "")
+                    if not content_val:
+                        content_val = desc
+                    img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content_val)
+                    if img_match:
+                        image = img_match.group(1)
+
+                print(f"🖼️ Image: {image[:80] if image else 'None'}")
+
                 items.append({
                     "title": title, "link": link,
                     "description": desc[:500], "image": image,
@@ -123,7 +155,7 @@ def rewrite_with_groq(item):
                         print(f"✅ Groq OK: {model_name}")
                         return parsed
 
-                return {"title": item["title"], "content": f"<p>{text_clean}</p>", "tags": [item["category"]]}
+                return {"title": item["title"], "content": f"<p>{text_clean}</p>", "tags": []}
 
             except Exception as e:
                 print(f"⚠️ {model_name} exception: {e}")
@@ -132,26 +164,6 @@ def rewrite_with_groq(item):
 
     print("❌ সব Groq model fail হয়েছে।")
     return None
-
-
-def find_image(item, tags):
-    url = item.get("image")
-    if url and re.search(r"\.(jpg|jpeg|png|webp|gif)", url, re.I):
-        return url
-    if PIXABAY_API_KEY:
-        kw = " ".join((tags or [])[:2]) or item["category"]
-        try:
-            r = requests.get("https://pixabay.com/api/", params={
-                "key": PIXABAY_API_KEY, "q": kw, "image_type": "photo",
-                "orientation": "horizontal", "per_page": 5, "safesearch": "true",
-            }, timeout=10)
-            hits = r.json().get("hits", [])
-            if hits:
-                return hits[0]["webformatURL"]
-        except Exception as e:
-            print(f"⚠️ Pixabay error: {e}")
-    color = "f59e0b" if item["category"] == "Crypto" else "3b82f6"
-    return f"https://placehold.co/800x400/{color}/ffffff?text={item['category']}+News"
 
 
 def get_access_token():
@@ -173,7 +185,12 @@ def create_blogger_post(rewritten, image_url, category, label):
 
     badge_color = "#f59e0b" if category == "Crypto" else "#3b82f6"
     badge_html  = f'<div style="margin-bottom:16px"><span style="background:{badge_color};color:#fff;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500">{label}</span></div>'
-    img_html    = f'<div style="text-align:center;margin-bottom:20px"><img src="{image_url}" alt="{rewritten["title"]}" style="max-width:100%;border-radius:8px;height:auto" /></div>' if image_url else ""
+
+    # ✅ RSS original image — Pixabay নেই
+    img_html = ""
+    if image_url and image_url.startswith("http"):
+        img_html = f'<div style="text-align:center;margin-bottom:20px"><img src="{image_url}" alt="{rewritten["title"]}" style="max-width:100%;border-radius:8px;height:auto" /></div>'
+
     social_html = f"""
     <hr style="border:0;border-top:1px solid #eee;margin:40px 0 20px" />
     <div style="font-family:sans-serif;font-size:15px;color:#555;">
@@ -187,8 +204,9 @@ def create_blogger_post(rewritten, image_url, category, label):
     </div>"""
 
     full_content = badge_html + img_html + rewritten["content"] + social_html
-    labels = [category, label.replace("⚽ ", "").replace("₿ ", "")] + (rewritten.get("tags") or [])
-    labels = list(dict.fromkeys(labels))[:10]
+
+    # ✅ শুধু একটাই label — Crypto অথবা Sports
+    labels = [category]
 
     r = requests.post(
         f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts/",
@@ -224,7 +242,7 @@ def main():
         if not rewritten:
             continue
 
-        image_url = find_image(item, rewritten.get("tags"))
+        image_url = item.get("image")  # ✅ শুধু RSS original image
         post_url  = create_blogger_post(rewritten, image_url, item["category"], item["label"])
         if not post_url:
             continue
