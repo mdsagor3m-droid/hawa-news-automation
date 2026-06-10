@@ -1,0 +1,43 @@
+name: Auto Blogger
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"  # প্রতি ৩ ঘণ্টায়
+  workflow_dispatch:        # manually run করা যাবে
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Auto Blogger
+        env:
+          GEMINI_API_KEY:          ${{ secrets.GEMINI_API_KEY }}
+          BLOGGER_BLOG_ID:         ${{ secrets.BLOGGER_BLOG_ID }}
+          BLOGGER_REFRESH_TOKEN:   ${{ secrets.BLOGGER_REFRESH_TOKEN }}
+          BLOGGER_CLIENT_ID:       ${{ secrets.BLOGGER_CLIENT_ID }}
+          BLOGGER_CLIENT_SECRET:   ${{ secrets.BLOGGER_CLIENT_SECRET }}
+          PIXABAY_API_KEY:         ${{ secrets.PIXABAY_API_KEY }}
+          POSTS_PER_RUN:           "3"
+        run: python blogger.py
+
+      - name: Save posted URLs
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+          git add posted_urls.json || true
+          git diff --staged --quiet || git commit -m "Update posted URLs"
+          git push || true
