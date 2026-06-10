@@ -5,11 +5,7 @@ import os
 import re
 import random
 import time
-from datetime import datetime
 
-# ============================================================
-#  CONFIG — GitHub Secrets থেকে নেবে
-# ============================================================
 GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 BLOGGER_BLOG_ID    = os.environ["BLOGGER_BLOG_ID"]
 REFRESH_TOKEN      = os.environ["BLOGGER_REFRESH_TOKEN"]
@@ -29,34 +25,20 @@ SOCIAL_LINKS = {
 }
 
 RSS_FEEDS = [
-    {
-        "url":      "https://cointelegraph.com/rss",
-        "category": "Crypto",
-        "label":    "₿ Crypto",
-    },
-    {
-        "url":      "https://feeds.bbci.co.uk/sport/rss.xml",
-        "category": "Sports",
-        "label":    "⚽ Sports",
-    },
+    {"url": "https://cointelegraph.com/rss",          "category": "Crypto", "label": "₿ Crypto"},
+    {"url": "https://feeds.bbci.co.uk/sport/rss.xml", "category": "Sports", "label": "⚽ Sports"},
 ]
 
+# ✅ Updated Groq models (2025)
 GROQ_MODELS = [
     "llama-3.1-8b-instant",
-    "llama3-8b-8192",
-    "gemma2-9b-it",
+    "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
 ]
 
-GROQ_PROMPT = """You are an expert news writer. Rewrite the following English news into an engaging, high-quality, and SEO-friendly English blog post.
-
-Rules:
-1. Title: Create an attractive, catchy, and SEO-friendly English title.
-2. Content: Write the content in clean HTML format using <h2>, <p>, <strong>, and <ul> tags.
-3. Word Count: Write at least 400 words.
-4. Conclusion: Include a nice concluding paragraph at the end.
-5. Language: Strictly write everything in ENGLISH. No Bengali words at all.
-6. Output: Provide the response ONLY in valid JSON format, nothing else — no markdown, no backticks:
-{"title": "English title here", "content": "HTML content here", "tags": ["tag1","tag2","tag3"]}"""
+GROQ_PROMPT = """You are an expert news writer. Rewrite the following English news into an engaging, SEO-friendly English blog post.
+Output ONLY valid JSON, no markdown, no backticks:
+{"title": "English title here", "content": "HTML content using <h2><p><strong><ul> tags, min 400 words", "tags": ["tag1","tag2","tag3"]}"""
 
 
 def load_posted():
@@ -87,12 +69,9 @@ def fetch_all_items():
                 elif "enclosures" in entry and entry.enclosures:
                     image = entry.enclosures[0].get("href")
                 items.append({
-                    "title":       title,
-                    "link":        link,
-                    "description": desc[:500],
-                    "image":       image,
-                    "category":    feed["category"],
-                    "label":       feed["label"],
+                    "title": title, "link": link,
+                    "description": desc[:500], "image": image,
+                    "category": feed["category"], "label": feed["label"],
                 })
         except Exception as e:
             print(f"⚠️ Feed error ({feed['url']}): {e}")
@@ -101,7 +80,7 @@ def fetch_all_items():
 
 
 def rewrite_with_groq(item):
-    prompt = GROQ_PROMPT + f"\n\nOriginal News:\nTitle: {item['title']}\nContent: {item['description']}"
+    prompt = GROQ_PROMPT + f"\n\nTitle: {item['title']}\nContent: {item['description']}"
 
     for model_name in GROQ_MODELS:
         for attempt in range(1, 4):
@@ -111,15 +90,15 @@ def rewrite_with_groq(item):
                     "https://api.groq.com/openai/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type":  "application/json",
+                        "Content-Type": "application/json",
                     },
                     json={
-                        "model":    model_name,
+                        "model": model_name,
                         "messages": [
-                            {"role": "system", "content": "You are a professional news blog writer. Always respond in valid JSON only."},
-                            {"role": "user",   "content": prompt},
+                            {"role": "system", "content": "You are a professional news blog writer. Always respond in valid JSON only. No markdown. No backticks."},
+                            {"role": "user", "content": prompt},
                         ],
-                        "max_tokens":  1500,
+                        "max_tokens": 1500,
                         "temperature": 0.7,
                     },
                     timeout=30,
@@ -132,7 +111,7 @@ def rewrite_with_groq(item):
                     continue
 
                 if response.status_code != 200:
-                    print(f"⚠️ {model_name} error: {response.status_code} — {response.text[:200]}")
+                    print(f"⚠️ {model_name} HTTP {response.status_code} — skip")
                     break
 
                 text = response.json()["choices"][0]["message"]["content"].strip()
@@ -144,7 +123,7 @@ def rewrite_with_groq(item):
                         print(f"✅ Groq OK: {model_name}")
                         return parsed
 
-                return {"title": item["title"], "content": f"<p>{text}</p>", "tags": [item["category"]]}
+                return {"title": item["title"], "content": f"<p>{text_clean}</p>", "tags": [item["category"]]}
 
             except Exception as e:
                 print(f"⚠️ {model_name} exception: {e}")
@@ -159,28 +138,18 @@ def find_image(item, tags):
     url = item.get("image")
     if url and re.search(r"\.(jpg|jpeg|png|webp|gif)", url, re.I):
         return url
-
     if PIXABAY_API_KEY:
         kw = " ".join((tags or [])[:2]) or item["category"]
         try:
-            r = requests.get(
-                "https://pixabay.com/api/",
-                params={
-                    "key":         PIXABAY_API_KEY,
-                    "q":           kw,
-                    "image_type":  "photo",
-                    "orientation": "horizontal",
-                    "per_page":    5,
-                    "safesearch":  "true",
-                },
-                timeout=10,
-            )
+            r = requests.get("https://pixabay.com/api/", params={
+                "key": PIXABAY_API_KEY, "q": kw, "image_type": "photo",
+                "orientation": "horizontal", "per_page": 5, "safesearch": "true",
+            }, timeout=10)
             hits = r.json().get("hits", [])
             if hits:
                 return hits[0]["webformatURL"]
         except Exception as e:
             print(f"⚠️ Pixabay error: {e}")
-
     color = "f59e0b" if item["category"] == "Crypto" else "3b82f6"
     return f"https://placehold.co/800x400/{color}/ffffff?text={item['category']}+News"
 
@@ -192,7 +161,11 @@ def get_access_token():
         "refresh_token": REFRESH_TOKEN,
         "grant_type":    "refresh_token",
     })
-    return r.json()["access_token"]
+    data = r.json()
+    if "access_token" not in data:
+        print(f"❌ Token error: {data}")
+        raise Exception(f"Blogger token failed: {data.get('error_description', data)}")
+    return data["access_token"]
 
 
 def create_blogger_post(rewritten, image_url, category, label):
@@ -200,11 +173,7 @@ def create_blogger_post(rewritten, image_url, category, label):
 
     badge_color = "#f59e0b" if category == "Crypto" else "#3b82f6"
     badge_html  = f'<div style="margin-bottom:16px"><span style="background:{badge_color};color:#fff;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:500">{label}</span></div>'
-
-    img_html = ""
-    if image_url:
-        img_html = f'<div style="text-align:center;margin-bottom:20px"><img src="{image_url}" alt="{rewritten["title"]}" style="max-width:100%;border-radius:8px;height:auto" /></div>'
-
+    img_html    = f'<div style="text-align:center;margin-bottom:20px"><img src="{image_url}" alt="{rewritten["title"]}" style="max-width:100%;border-radius:8px;height:auto" /></div>' if image_url else ""
     social_html = f"""
     <hr style="border:0;border-top:1px solid #eee;margin:40px 0 20px" />
     <div style="font-family:sans-serif;font-size:15px;color:#555;">
@@ -218,24 +187,13 @@ def create_blogger_post(rewritten, image_url, category, label):
     </div>"""
 
     full_content = badge_html + img_html + rewritten["content"] + social_html
-
     labels = [category, label.replace("⚽ ", "").replace("₿ ", "")] + (rewritten.get("tags") or [])
     labels = list(dict.fromkeys(labels))[:10]
 
-    body = {
-        "title":   rewritten["title"],
-        "content": full_content,
-        "labels":  labels,
-        "status":  "LIVE",
-    }
-
     r = requests.post(
         f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts/",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type":  "application/json",
-        },
-        json=body,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"title": rewritten["title"], "content": full_content, "labels": labels, "status": "LIVE"},
     )
 
     if r.status_code in (200, 201):
@@ -243,7 +201,7 @@ def create_blogger_post(rewritten, image_url, category, label):
         print(f"✅ Blogger post হয়েছে: {url}")
         return url
     else:
-        print(f"❌ Blogger error: {r.text}")
+        print(f"❌ Blogger error: {r.status_code} — {r.text[:300]}")
         return None
 
 
@@ -277,7 +235,7 @@ def main():
         print(f"✅ Posted ({count}/{POSTS_PER_RUN}): {rewritten['title']}")
 
         if count < POSTS_PER_RUN:
-            print("⏱️ পরের post এর জন্য 10s অপেক্ষা...")
+            print("⏱️ 10s অপেক্ষা...")
             time.sleep(10)
 
     print(f"🏁 সম্পন্ন! এই run এ {count}টি post হয়েছে।")
